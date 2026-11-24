@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="warn">
+    <Appenders>
+        <Console name="console" target="SYSTEM_OUT">
+            <PatternLayout pattern="%-5p %c{1}:%L - %m%n"/>
+        </Console>
+    </Appenders>
+    <Loggers>
+        <Root level="info">
+            <AppenderRef ref="console"/>
+        </Root>
+
+        <!-- Extension package logger. Required by StudioLogMirror: the base image's
+             generate-log4j2-file.sh only carries over the <Logger> names/levels declared
+             here (it discards this appender section and forces its own stdout-only one),
+             and the mirror attaches its stderr appender to this logger's config — without
+             this entry the mirror would fall back to the Root config. All of this
+             extension's logging lives under this package. -->
+        <Logger name="app.kristasoft.extensions.essentials.collaboration.google_calendar3" additivity="false" level="info">
+            <AppenderRef ref="console"/>
+        </Logger>
+    </Loggers>
+</Configuration>

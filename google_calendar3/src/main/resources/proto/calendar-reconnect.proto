@@ -1,0 +1,55 @@
+// File name: calendar-reconnect.proto
+// Generated from: calendar-reconnect.proto
+// schemaPackageName: app.krista.conversationagent.module.calendar.esb (CA's package - wire compat)
+syntax = "proto2";
+package app.krista.conversationagent.module.calendar.esb;
+
+
+message CalendarConnectionStatusChangedProto {
+
+   optional string workspaceId = 1;
+
+   optional string email = 2;
+
+   optional string calendarSystem = 3;
+
+   optional string status = 4;
+
+   optional string lastErrorCode = 5;
+
+   optional string lastErrorMessage = 6;
+
+   optional int64 occurredAtEpochMillis = 7 [default = 0];
+
+   optional string correlationId = 8;
+
+   optional string reason = 9;
+
+   // Field 10 carried userTokenHeld in an unreleased 3.1.3 build. Under the Always On either/or
+   // rule a status is published from exactly one credential, so the fact is gone. Meeting Agent
+   // reserves the number too: never reuse it for anything else.
+   reserved 10;
+   reserved "userTokenHeld";
+}
+
+
+// NOTE: keep every comment in this file ASCII. The protostream lexer rejects non-ASCII
+// characters even inside a comment, and the failure is a schema that will not parse at all.
+//
+// CalendarAuthInitiateCommandProto and CalendarAuthInitiateReplyProto used to live here.
+// They now ship in the staged CA contract jar as proto/ext/calendar/calendar-auth-initiate.proto,
+// under this same package and with these same message names, so declaring them here too would
+// make protostream reject the duplicate and the auth-initiate consumer would never start.
+// See CalendarReconnectEsbProtoInitializer.
+
+
+message CalendarReminderSendProto {
+
+   optional string workspaceId = 1;
+
+   optional string email = 2;
+
+   optional string calendarSystem = 3;
+
+   optional string correlationId = 4;
+}

@@ -1,0 +1,442 @@
+import java.util.regex.Pattern
+
+plugins {
+    id 'java'
+    id 'jacoco'
+    id "com.github.node-gradle.node" version "3.1.0"
+    id 'maven-publish'
+    id 'org.sonarqube' version '6.3.1.5724'
+}
+
+apply plugin: 'java-library'
+group 'app.krista.extensions.essentials.collaboration'
+
+def computedBaseName = "Google Calendar-V3"
+def computedVersion = "local"
+def releasePropsFile = file('release.properties')
+if (releasePropsFile.exists()) {
+    def props = new Properties()
+    releasePropsFile.withInputStream { stream -> props.load(stream) }
+    computedBaseName = (props['extension.name'] ?: "Google Calendar-V3").replaceAll(/\s+/, "")
+    computedVersion = props['extension.version'] ?: "local"
+}
+version = computedVersion
+
+if (rootProject.file('builder.txt').canRead()) {
+    ext.builder = rootProject.file('builder.txt').text.trim()
+} else {
+    ext.builder = "0"
+}
+
+node {
+    version = '24.2.0'
+    npmVersion = '7.0.8'
+    yarnVersion = '1.22.17'
+    download = true
+    workDir = file("${project.projectDir}/src/main/ui/googlecalendaroauth/nodejs")
+    npmWorkDir = file("${project.projectDir}/src/main/ui/googlecalendaroauth/npm")
+    yarnWorkDir = file("${project.projectDir}/src/main/ui/googlecalendaroauth/yarn")
+    nodeModulesDir = file("${project.projectDir}/src/main/ui/googlecalendaroauth/")
+}
+
+tasks.register('updateVersion') {
+    doFirst {
+        project.ext.newbuilder = Integer.parseInt(project.ext.builder) + 1
+        print "Building extension version: ${version}-${project.ext.newbuilder}"
+        rootProject.file('builder.txt').text = project.ext.newbuilder
+        System.clearProperty("extensionVersion")
+        System.setProperty("extensionVersion", "${version}-${project.ext.newbuilder}")
+    }
+}
+
+System.setProperty("extensionVersion", version.toString())
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+repositories {
+    maven {
+        url "https://packages.cicd.in.antbrains.com/artifactory/libs-release"
+    }
+    mavenCentral()
+    mavenLocal()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-Xlint:all,-serial'
+}
+
+tasks.register('compile') {
+    dependsOn compileJava
+}
+
+tasks.named('compileTestJava') {
+    dependsOn(tasks.named('buildAndCopyUI'))
+}
+
+// krista-infra's `esb` pulls in `:pubsub` as runtimeOnly purely so ManagementTelemetryPublisher can
+// ServiceLoader-discover PubSubManagementTelemetrySink. That sink opens a data grid with an EMPTY
+// DGConnectionConfig, which falls through to infra's bundled default_data_grid.properties
+// (server_list=infinispan:11222, auth_username=infinispan) — i.e. whatever grid happens to answer to
+// the bare name "infinispan" in the pod's namespace (the appliance's own), or nothing at all. This
+// extension has no data grid, so every attempt fails (ELY05161 / UnknownHost) and retries forever.
+// As of krista-infra 2.0.450 there is also a property off-switch —
+// krista.mgmnt.backplane.pubsub.enabled=false (env KRISTA_MGMNT_BACKPLANE_PUBSUB_ENABLED) — and
+// ManagementTelemetryPublisher.defaultSecondarySinkProvider then discovers, initializes and opens no
+// secondary sink at all. The exclude stays, because it is the stronger of the two: the sink is found
+// by classpath presence, so no stray property in an appliance's configuration can switch it back on,
+// and removing the module keeps pubsub and its grid client out of the extension jar entirely.
+// Raw ESB management telemetry is unaffected either way.
+configurations.configureEach {
+    exclude group: 'app.krista.infra', module: 'pubsub'
+}
+
+dependencies {
+    annotationProcessor 'app.krista:extension-impl-anno-processors:1.0.126'
+    implementation 'app.krista:krista-apis:1.0.126'
+
+    // ── Conversation Agent contract SDK, staged (KIM-492 WP-E15) ─────────────
+    // The generated output of MA's :contracts project — @KristaService service
+    // definitions, typed clients, the .proto schemas, the Protostream
+    // initializers and one marshaller per DTO — committed under libs/ as a
+    // build input. Nobody edits it; a refresh is a two-file diff.
+    //
+    // This replaces the hand-carry model: the DTOs this extension kept under
+    // app/krista/conversationagent/module/** and its own hand-written
+    // marshallers existed only so MA's dtoClass values could be resolved by
+    // Class.forName, and each was a second, drifting definition of a wire
+    // contract MA already owns.
+    //
+    // Version and refresh rules: gradle.properties#caContractsVersion.
+    // Drift control: CaContractFingerprintTest (build-failing) plus the startup
+    // handshake in GoogleServiceBusManager.
+    implementation files("libs/conversation-agent-contracts-${caContractsVersion}.jar")
+    implementation 'org.glassfish.hk2:hk2-api:3.0.3'
+    implementation 'com.github.scribejava:scribejava-apis:8.3.3'
+    implementation 'javax.mail:mail:1.4.7'
+
+    // ESB infrastructure for calendar reconnect handshake with CA Service (WP10).
+    //
+    // EXACT pin, and every app.krista.infra coordinate carries the SAME value, deliberately:
+    // esb transitively pulls infra-core and the rest of the graph, so a mixed set splits the
+    // classpath and ProtoWire.ensureRegisteredByName surfaces the split as a
+    // LinkageError/NoClassDefFoundError at first use rather than as a resolution warning.
+    // Mirrors conversation-agent's dependencies.gradle:83-96.
+    //
+    // 1.1.433 -> 2.0.434 (KIM-492 WP-E14): CA was on 2.0.434 and this extension had to sit on the
+    // same matched set before it could link CA's generated contract jar (WP-E15) instead of
+    // hand-carrying DTOs and marshallers.
+    //
+    // 2.0.434 -> 2.0.449 (2026-10-02): tracks CA, which is on 2.0.449. The matched set is the whole
+    // point of the pin, so this moves only in step with CA. Two floors that must never be crossed,
+    // both recorded in CA's dependencies.gradle: 2.0.415 is QUARANTINED upstream (krista-infra
+    // release.quarantinedVersions) and must never be pinned, and 2.0.421 is the NAMESPACE-PARITY
+    // floor — the 2.0 line was cut before the KIM-451 deployment-namespace work, so 2.0.418-2.0.420
+    // have no broker.dest.namespace support and EsbEndpointBinding's NAMESPACE_PROPERTY would
+    // silently stop prefixing every destination. 2.0.449 satisfies both.
+    //
+    // The WP-E14 move took the Google extension off the 1.1 line, which removed one 1.1
+    // cache-creator from the fleet. It does NOT fix the fleet-wide DIST_ASYNC cache problem: infra
+    // develop-1.1 has no ReplicationMode, so any 1.1 service that mints a shared cache first wins
+    // and nothing reconciles. KA and RA are no longer on the old line either — both moved straight
+    // to 2.0.449 alongside this bump.
+    //
+    // 2.0.449 -> 2.0.450 (2026-10-06): picks up KI-144, which is the one that matters to this
+    // extension. TextRequestReply called session.createTemporaryQueue() per exchange, and Artemis
+    // mints an address of the same bare-UUID name beside the queue; TemporaryQueue.delete() reclaims
+    // the queue but never the address, so every calendar-reconnect exchange left one behind for the
+    // catch-all block's auto-delete-addresses delay to reap (measured upstream at ~29.3k addresses
+    // in equilibrium on a broker under 0.3 msg/s). It now keeps ONE reply queue per instance —
+    // replies were already matched by a per-request JMSCorrelationID selector, so the per-exchange
+    // queue bought nothing. The release's other two fixes do not reach this extension: KI-145 is in
+    // :pubsub, excluded above, and KI-146 is in :workflow, which this extension does not pin and
+    // does not resolve transitively.
+    //
+    // This is the FIRST build where the pin sits one AHEAD of CA, which is still on 2.0.449, and it
+    // is deliberate rather than drift. Safe only because 2.0.450 carries no wire change: between
+    // v2.0.449 and v2.0.450 there is no .proto, no generated marshaller and no
+    // EsbEndpointBinding/namespace change, so both ends of the wire still agree and the staged
+    // contract jar's fingerprint is untouched. The matched-set rule is unchanged for this project's
+    // OWN classpath — every app.krista.infra coordinate below still carries one identical value.
+    // Put CA on 2.0.450 at its next bump and the skew closes.
+    //
+    // The two third-party pins below are now STALE BUT HARMLESS: Gradle conflict resolution lifts
+    // protostream 6.0.3 -> 6.0.7 (via infinispan-commons, pulled by esb) and
+    // artemis-jms-client 2.41.0 -> 2.44.0 (via esb-consumer). 6.0.7 and 2.44.0 are exactly what CA
+    // resolves, so both ends of the wire agree — which is the property that actually matters.
+    // Editing the declarations to match would pin values the infra line owns.
+    implementation 'org.infinispan.protostream:protostream:6.0.3'
+    implementation 'app.krista.infra:esb:2.0.450'
+    implementation 'app.krista.infra:esb-annotations-runtime:2.0.450'
+    compileOnly 'app.krista.infra:esb-annotation-processor:2.0.450'
+    implementation 'app.krista.infra:infra-core:2.0.450'
+    implementation 'org.apache.activemq:artemis-jms-client:2.41.0'
+
+    // Google Calendar API 2.0.0 and required dependencies
+    implementation 'com.google.apis:google-api-services-calendar:v3-rev20250404-2.0.0'
+
+    // KIM-474: Admin SDK Directory — enumerates the customer's Google Workspace mailboxes for
+    // Always On tenant-wide capture. Reached only on the domain-wide-delegation path; unused while
+    // Always On is off. Revision pinned to the same era as the Calendar client above so both sit on
+    // one google-api-client generation.
+    implementation 'com.google.apis:google-api-services-admin-directory:directory_v1-rev20250421-2.0.0'
+
+    implementation 'com.google.api-client:google-api-client:2.7.0'
+    implementation 'com.google.http-client:google-http-client-gson:1.45.1'
+
+    // Modern Google Auth Library (replaces deprecated GoogleCredential)
+    implementation 'com.google.auth:google-auth-library-oauth2-http:1.23.0'
+
+    // log4j-core for StudioLogMirror (programmatic stderr appender for the Studio Extension
+    // Log panel). Already on the runtime classpath transitively at this exact version — the
+    // explicit entry just makes it available at compile time.
+    implementation 'org.apache.logging.log4j:log4j-core:2.25.3'
+
+    implementation 'org.glassfish.jersey.media:jersey-media-multipart:2.35'
+    implementation 'org.jsoup:jsoup:1.15.1'
+    implementation 'commons-validator:commons-validator:1.7'
+
+    // Test dependencies
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.3'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params:5.9.3'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.3'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.9.3'
+    testImplementation 'org.mockito:mockito-core:5.3.1'
+    testImplementation 'org.mockito:mockito-junit-jupiter:5.3.1'
+    testImplementation 'net.bytebuddy:byte-buddy:1.14.4'
+    testImplementation 'net.bytebuddy:byte-buddy-agent:1.14.4'
+}
+
+test {
+    useJUnitPlatform()
+
+    // Add these settings to help diagnose test issues
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+    }
+
+    // Enable experimental support for Java 21+ in Byte Buddy
+    jvmArgs '-Dnet.bytebuddy.experimental=true'
+
+    // Use a different mocking strategy
+    systemProperty 'mockito.mock.maker', 'subclass'
+
+    // Increase memory if needed
+    maxHeapSize = "1G"
+
+    finalizedBy jacocoTestReport
+}
+
+jacoco {
+    toolVersion = "0.8.11"
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+sonar {
+    properties {
+        property('sonar.projectName', 'SonarScanner for Krista Global Catalog (google_calendar3 with Jacoco code coverage)')
+        property("sonar.projectKey", "sonar-scanner-google_calendar3")
+        property("sonar.sources", "src/main/java")
+        property("sonar.tests", "src/test/java")
+        property("sonar.java.binaries", "build/classes/java/main")
+        property("sonar.java.test.binaries", "build/classes/java/test")
+        property("sonar.coverage.jacoco.xmlReportPaths", "build/reports/jacoco/test/jacocoTestReport.xml")
+        property("sonar.junit.reportPaths", "build/test-results/test")
+    }
+}
+
+tasks.named("sonar") {
+    dependsOn(tasks.jacocoTestReport)
+}
+
+tasks.register('filepermission', Exec) {
+    commandLine('chmod', '-R', '755', "${project.projectDir}/src/main/ui/googlecalendaroauth")
+}
+
+tasks.register('bundleUI', YarnTask) {
+    dependsOn(tasks.named('nodeSetup'))
+    dependsOn(tasks.named('yarnSetup'))
+    dependsOn(tasks.named('yarn'))
+    execOverrides {
+        it.workingDir = file("src/main/ui/googlecalendaroauth")
+    }
+    args.set(['build'])
+}
+
+tasks.register('buildAndCopyUI', Copy) {
+    dependsOn(tasks.named("bundleUI"))
+    from("${project.projectDir}/src/main/ui/googlecalendaroauth/build")
+    into("${project.buildDir}/resources/main/ui/googlecalendaroauth")
+}
+
+tasks.register('buildUI') {
+    dependsOn tasks.named('buildAndCopyUI')
+    dependsOn tasks.named('filepermission')
+    doFirst {
+        println "[buildUI] Triggered from ${gradle.startParameter.taskNames}"
+    }
+}
+
+tasks.named('processResources') {
+    dependsOn tasks.named('buildUI')
+}
+
+compileJava.dependsOn updateVersion, tasks.named('buildUI')
+tasks.named('classes') {
+    dependsOn tasks.named('buildUI')
+}
+
+
+
+tasks.register('cleanupCopiedUI', Delete) {
+    delete file("${project.buildDir}/resources/main/ui/googlecalendaroauth")
+}
+
+tasks.named('jar') {
+    dependsOn tasks.named('generateReleaseProperties'), tasks.named('buildUI'), tasks.named('processResources')
+    finalizedBy tasks.named('cleanupCopiedUI')
+
+    archiveBaseName.set(computedBaseName)
+
+    doFirst {
+        println "Waiting half second for generateReleaseProperties to complete..."
+        Thread.sleep(500)
+        println "Wait complete, proceeding with jar creation..."
+
+        def jarReleasePropsFile = file('release.properties')
+        if (jarReleasePropsFile.exists()) {
+            def props = new Properties()
+            jarReleasePropsFile.withInputStream { stream -> props.load(stream) }
+            def actualBaseName = (props['extension.name'] ?: "Google Calendar-V3").replaceAll(/\s+/, "")
+            def actualVersion = props['extension.version'] ?: "local"
+
+            println "Using jar name from release.properties: ${actualBaseName}-${actualVersion}.jar"
+            archiveBaseName.set(actualBaseName)
+            archiveVersion.set(actualVersion)
+        } else {
+            println "release.properties not found, using fallback values"
+        }
+    }
+
+    manifest {}
+    from({
+        configurations.runtimeClasspath.collect {
+            it.isDirectory() ? it : zipTree(it)
+        }
+    }) {
+        // Dependencies (workflow, dg-bsm, rateManagement, ...) each ship their own
+        // META-INF/services/org.infinispan.protostream.SerializationContextInitializer.
+        // With duplicatesStrategy=exclude the winner of that path collision is
+        // non-deterministic across builds; when a dependency's copy wins it shadows THIS
+        // module's initializer, so CalendarReconnectEsbProtoInitializerImpl never registers
+        // and publishing CalendarConnectionStatusChanged fails at serialization with
+        // "No marshaller registered". Exclude the dependency copies so this module's own
+        // service file (from src/main/resources) is always the one that ships; the platform
+        // provides the dependency initializers on its own runtime classpath.
+        exclude 'META-INF/services/org.infinispan.protostream.SerializationContextInitializer'
+    }
+    exclude 'META-INF/*.RSA', 'META-INF/*.SF', 'META-INF/*.DSA'
+    duplicatesStrategy = "exclude"
+}
+
+tasks.withType(Test).configureEach {
+    doFirst {
+        def byteBuddyAgent = configurations.testRuntimeClasspath.find { it.name.contains('byte-buddy-agent') }
+        if (byteBuddyAgent) {
+            jvmArgs "-javaagent:${byteBuddyAgent}"
+        }
+    }
+}
+
+// Add a task to create the mockito-extensions directory and file
+tasks.register('createMockitoExtensions') {
+    doLast {
+        def mockitoDir = file("${project.projectDir}/src/test/resources/mockito-extensions")
+        mockitoDir.mkdirs()
+        def mockMakerFile = file("${mockitoDir}/org.mockito.plugins.MockMaker")
+        mockMakerFile.text = 'mock-maker-inline\n'
+        println "Created mockito-extensions directory and MockMaker file"
+    }
+}
+
+// Make sure the test task depends on createMockitoExtensions
+tasks.named('test') {
+    dependsOn tasks.named('createMockitoExtensions')
+}
+
+abstract class GenerateReleasePropertiesTask extends DefaultTask {
+    @TaskAction
+    def generateProperties() {
+        def extensionFilePath = 'src/main/java/app/kristasoft/extensions/essentials/collaboration/google_calendar3/GoogleCalendarExtension.java'
+        def areaFilePath = 'src/main/java/app/kristasoft/extensions/essentials/collaboration/google_calendar3/catalog/MeetingsArea.java'
+        def extensionFile = project.file(extensionFilePath)
+        def areaFile = project.file(areaFilePath)
+        if (!extensionFile.exists()) throw new GradleException("Extension file not found: ${extensionFilePath}")
+        if (!areaFile.exists()) throw new GradleException("Area file not found: ${areaFilePath}")
+
+        def properties = new Properties()
+        def keyValuePattern = Pattern.compile(/(\w+)\s*=\s*"([^"]+)"/)
+        extractAnnotationInfo(extensionFile, "@Extension", keyValuePattern) { key, value ->
+            if (key == "name") properties.setProperty("extension.name", value)
+            if (key == "version") properties.setProperty("extension.version", value)
+        }
+        extractAnnotationInfo(areaFile, "@Domain", keyValuePattern) { key, value ->
+            if (key == "name") properties.setProperty("domain.name", value)
+            if (key == "ecosystemName") properties.setProperty("ecosystem.name", value)
+        }
+
+        if (!properties.getProperty('extension.version')) throw new GradleException("extension version missing")
+        if (!properties.getProperty('domain.name') || !properties.getProperty('ecosystem.name')) throw new GradleException("domain/ecosystem missing")
+
+        def releasePropertiesFile = project.file('release.properties')
+        releasePropertiesFile.text = properties.collect { k, v -> "${k}=${v}" }.join('\n') + '\n'
+        logger.lifecycle("Generated release.properties with content:\n${releasePropertiesFile.text}")
+    }
+
+    private static void extractAnnotationInfo(File file, String annotationName, Pattern keyValuePattern, Closure processProperty) {
+        StringBuilder annotationText = new StringBuilder()
+        boolean inAnnotation = false
+        file.eachLine { line ->
+            line = line.trim()
+            if (line.contains(annotationName)) inAnnotation = true
+            if (inAnnotation) {
+                annotationText.append(line)
+                if (line.contains(")")) {
+                    inAnnotation = false
+                    def matcher = keyValuePattern.matcher(annotationText.toString())
+                    while (matcher.find()) processProperty(matcher.group(1), matcher.group(2))
+                }
+            }
+        }
+    }
+}
+
+tasks.register('generateReleaseProperties', GenerateReleasePropertiesTask) {
+    group = 'build'
+    description = 'Generates release.properties file with extension version and domain information'
+}
+// --- Coverage gate: require >= 60% LINE coverage (KE ticket) ---
+jacocoTestCoverageVerification {
+    dependsOn tasks.test
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                value = 'COVEREDRATIO'
+                minimum = 0.24
+            }
+        }
+    }
+}
+tasks.named('check') { dependsOn tasks.jacocoTestCoverageVerification }

@@ -1,0 +1,6 @@
+# The staged Conversation Agent contract SDK is a committed BUILD INPUT, not a
+# build output (KIM-492 WP-E15). The repo-root .gitignore excludes *.jar, which
+# is right for everything a build produces and wrong for this one: the jar and
+# its .fingerprint sidecar have to travel together in source control or the
+# drift check has nothing to check against. See gradle.properties#caContractsVersion.
+!libs/*.jar
