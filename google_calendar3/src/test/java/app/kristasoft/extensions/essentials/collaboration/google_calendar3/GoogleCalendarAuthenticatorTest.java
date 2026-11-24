@@ -50,7 +50,7 @@ class GoogleCalendarAuthenticatorTest {
         Account account = mock(Account.class);
         when(context.getAuthorizedAccount()).thenReturn(account);
         when(account.getAccountId()).thenReturn("wsContact_admin");
-        String token = "9ebc240b-71e8-4bb1-9ebc-12db15678fed";
+        String token = "REDACTED_SECRET";
         String clientId = "114009213202650966532";
         when(setupStore.create("INV_google_calendar", clientId, "wsContact_admin"))
                 .thenReturn(token);

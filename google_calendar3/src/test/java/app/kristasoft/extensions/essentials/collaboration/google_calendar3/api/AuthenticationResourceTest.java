@@ -114,7 +114,7 @@ class AuthenticationResourceTest {
 
     @Test
     void dwdSetupContinuesPendingConversationAfterAdminReturns() {
-        String token = "9ebc240b-71e8-4bb1-9ebc-12db15678fed";
+        String token = "REDACTED_SECRET";
         DwdSetupStore.PendingSetup pending = new DwdSetupStore.PendingSetup(
                 "114009213202650966532", "wsContact_admin", System.currentTimeMillis() + 60_000);
         when(dwdSetupStore.find(INVOKER_ID, token)).thenReturn(pending);
@@ -132,7 +132,7 @@ class AuthenticationResourceTest {
 
     @Test
     void dwdSetupDoesNotContinueWithoutKristaAuthentication() {
-        String token = "9ebc240b-71e8-4bb1-9ebc-12db15678fed";
+        String token = "REDACTED_SECRET";
         when(dwdSetupStore.find(INVOKER_ID, token)).thenReturn(new DwdSetupStore.PendingSetup(
                 "114009213202650966532", "wsContact_admin", System.currentTimeMillis() + 60_000));
 
